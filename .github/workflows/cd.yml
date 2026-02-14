@@ -1,0 +1,62 @@
+name: CD
+
+on:
+  push:
+    branches:
+      - develop
+      - staging
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-mobile:
+    runs-on: ubuntu-latest
+    outputs:
+      env_name: ${{ steps.env.outputs.env_name }}
+      tag: ${{ steps.env.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve environment
+        id: env
+        run: |
+          if [ "${GITHUB_REF_NAME}" = "develop" ]; then
+            echo "env_name=development" >> $GITHUB_OUTPUT
+            echo "tag=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          elif [ "${GITHUB_REF_NAME}" = "staging" ]; then
+            echo "env_name=staging" >> $GITHUB_OUTPUT
+            echo "tag=stg-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          else
+            echo "env_name=production" >> $GITHUB_OUTPUT
+            echo "tag=prod-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ steps.env.outputs.tag }}.apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+  deploy:
+    needs: build-mobile
+    runs-on: ubuntu-latest
+    environment: ${{ needs.build-mobile.outputs.env_name }}
+    steps:
+      - name: Deploy placeholder
+        run: |
+          echo "Deploying mobile ${{ needs.build-mobile.outputs.env_name }} with tag ${{ needs.build-mobile.outputs.tag }}"
+          echo "Replace this step with App Distribution / Play Store / TestFlight deploy command"
