@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -411,6 +412,30 @@ class _DashboardPageState extends State<DashboardPage> {
 
   @override
   Widget build(BuildContext context) {
+    const motionPreviewData = [
+      _MotionCardData(
+        title: 'Aurora Product Card',
+        subtitle: 'Glow motion + tilt focus',
+        price: '\$129.90',
+        colorA: Color(0xFF22D3EE),
+        colorB: Color(0xFF2563EB),
+      ),
+      _MotionCardData(
+        title: 'Ember Product Card',
+        subtitle: 'Warm tone + reveal',
+        price: '\$89.50',
+        colorA: Color(0xFFFB7185),
+        colorB: Color(0xFFF97316),
+      ),
+      _MotionCardData(
+        title: 'Live Badge Card',
+        subtitle: 'Ready for livestream CTA',
+        price: '\$59.00',
+        colorA: Color(0xFF34D399),
+        colorB: Color(0xFF0EA5E9),
+      ),
+    ];
+
     final pages = [
       ListView(
         padding: const EdgeInsets.all(16),
@@ -463,9 +488,23 @@ class _DashboardPageState extends State<DashboardPage> {
             child: ListTile(
               leading: const Icon(Icons.storefront_outlined),
               title: const Text('Mở trang bán hàng'),
-              subtitle: const Text('Trang chính Framer/React trên mini app'),
+              subtitle: const Text('Trang miniapp React với hiệu ứng ThreeJS + Tilt'),
               trailing: const Icon(Icons.open_in_new),
               onTap: () => _openLive('Trang bán hàng', '/'),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Text('Preview hiệu ứng card (native Flutter)', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 210,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: motionPreviewData.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 12),
+              itemBuilder: (context, index) {
+                return _RevealTiltCard(data: motionPreviewData[index], index: index);
+              },
             ),
           ),
         ],
@@ -513,6 +552,147 @@ class _DashboardPageState extends State<DashboardPage> {
           NavigationDestination(icon: Icon(Icons.live_tv_outlined), label: 'Livestream'),
           NavigationDestination(icon: Icon(Icons.person_outline), label: 'Tài khoản'),
         ],
+      ),
+    );
+  }
+}
+
+class _MotionCardData {
+  const _MotionCardData({
+    required this.title,
+    required this.subtitle,
+    required this.price,
+    required this.colorA,
+    required this.colorB,
+  });
+
+  final String title;
+  final String subtitle;
+  final String price;
+  final Color colorA;
+  final Color colorB;
+}
+
+class _RevealTiltCard extends StatelessWidget {
+  const _RevealTiltCard({
+    required this.data,
+    required this.index,
+  });
+
+  final _MotionCardData data;
+  final int index;
+
+  @override
+  Widget build(BuildContext context) {
+    final duration = Duration(milliseconds: 380 + index * 120);
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: duration,
+      curve: Curves.easeOutCubic,
+      builder: (context, value, child) {
+        return Opacity(
+          opacity: value,
+          child: Transform.translate(
+            offset: Offset(0, (1 - value) * 18),
+            child: child,
+          ),
+        );
+      },
+      child: _TiltPreviewCard(data: data),
+    );
+  }
+}
+
+class _TiltPreviewCard extends StatefulWidget {
+  const _TiltPreviewCard({required this.data});
+
+  final _MotionCardData data;
+
+  @override
+  State<_TiltPreviewCard> createState() => _TiltPreviewCardState();
+}
+
+class _TiltPreviewCardState extends State<_TiltPreviewCard> {
+  double _rx = 0;
+  double _ry = 0;
+
+  void _onPanUpdate(DragUpdateDetails details) {
+    setState(() {
+      _ry = (_ry + details.delta.dx * 0.006).clamp(-0.25, 0.25);
+      _rx = (_rx - details.delta.dy * 0.006).clamp(-0.25, 0.25);
+    });
+  }
+
+  void _reset() {
+    setState(() {
+      _rx = 0;
+      _ry = 0;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onPanUpdate: _onPanUpdate,
+      onPanEnd: (_) => _reset(),
+      onPanCancel: _reset,
+      child: Transform(
+        alignment: Alignment.center,
+        transform: Matrix4.identity()
+          ..setEntry(3, 2, 0.001)
+          ..rotateX(_rx)
+          ..rotateY(_ry),
+        child: Container(
+          width: 230,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                widget.data.colorA.withValues(alpha: 0.26),
+                widget.data.colorB.withValues(alpha: 0.26),
+              ],
+            ),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.25)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 9,
+                    height: 9,
+                    decoration: BoxDecoration(color: widget.data.colorA, shape: BoxShape.circle),
+                  ),
+                  const SizedBox(width: 8),
+                  const Text('MOTION CARD', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(widget.data.title, maxLines: 2, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 4),
+              Text(widget.data.subtitle, maxLines: 2, style: TextStyle(fontSize: 12, color: Colors.black.withValues(alpha: 0.65))),
+              const Spacer(),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(widget.data.price, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+                  Icon(Icons.flash_on_rounded, color: Color.lerp(widget.data.colorA, widget.data.colorB, 0.5)),
+                ],
+              ),
+              const SizedBox(height: 8),
+              LinearProgressIndicator(
+                value: 0.72 + math.sin((_rx + _ry) * 2) * 0.08,
+                backgroundColor: Colors.white.withValues(alpha: 0.24),
+                valueColor: AlwaysStoppedAnimation<Color>(widget.data.colorA),
+                minHeight: 5,
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
