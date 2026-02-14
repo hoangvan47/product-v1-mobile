@@ -1,122 +1,809 @@
+import 'dart:convert';
+import 'dart:math' as math;
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+
+const miniAppBaseUrl = String.fromEnvironment(
+  'MINI_APP_URL',
+  defaultValue: 'http://127.0.0.1:5173',
+);
+
+const apiBaseUrl = String.fromEnvironment(
+  'API_BASE_URL',
+  defaultValue: 'http://127.0.0.1:3000',
+);
 
 void main() {
-  runApp(const MyApp());
+  runApp(const MiniAppHost());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class MiniAppHost extends StatelessWidget {
+  const MiniAppHost({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Live Commerce Mobile',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0EA5E9)),
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const AppRootPage(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
+class AuthSession {
+  const AuthSession({
+    required this.email,
+    required this.accessToken,
+    required this.refreshToken,
+  });
 
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
+  final String email;
+  final String accessToken;
+  final String refreshToken;
 
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
+  Map<String, String> toStorage() => {
+    'email': email,
+    'accessToken': accessToken,
+    'refreshToken': refreshToken,
+  };
 
-  final String title;
-
-  @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  static AuthSession? fromStorage(Map<String, String?> values) {
+    final email = values['email'];
+    final accessToken = values['accessToken'];
+    final refreshToken = values['refreshToken'];
+    if (
+        email == null ||
+        email.isEmpty ||
+        accessToken == null ||
+        accessToken.isEmpty ||
+        refreshToken == null ||
+        refreshToken.isEmpty) {
+      return null;
+    }
+    return AuthSession(
+      email: email,
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+  }
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class AuthStorage {
+  static const _emailKey = 'auth_email';
+  static const _accessTokenKey = 'auth_access_token';
+  static const _refreshTokenKey = 'auth_refresh_token';
 
-  void _incrementCounter() {
+  Future<AuthSession?> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    return AuthSession.fromStorage({
+      'email': prefs.getString(_emailKey),
+      'accessToken': prefs.getString(_accessTokenKey),
+      'refreshToken': prefs.getString(_refreshTokenKey),
+    });
+  }
+
+  Future<void> save(AuthSession session) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_emailKey, session.email);
+    await prefs.setString(_accessTokenKey, session.accessToken);
+    await prefs.setString(_refreshTokenKey, session.refreshToken);
+  }
+
+  Future<void> clear() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_emailKey);
+    await prefs.remove(_accessTokenKey);
+    await prefs.remove(_refreshTokenKey);
+  }
+}
+
+class AuthApi {
+  Future<AuthSession> login({
+    required String email,
+    required String password,
+  }) async {
+    final response = await http.post(
+      Uri.parse('$apiBaseUrl/auth/login'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'email': email, 'password': password}),
+    );
+
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    if (response.statusCode >= 400) {
+      final message = data['message'];
+      if (message is String) {
+        throw Exception(message);
+      }
+      if (message is List && message.isNotEmpty) {
+        throw Exception(message.first.toString());
+      }
+      throw Exception('Đăng nhập thất bại');
+    }
+
+    final user = data['user'] as Map<String, dynamic>? ?? {};
+    final responseEmail = user['email']?.toString() ?? email;
+    final accessToken = data['accessToken']?.toString();
+    final refreshToken = data['refreshToken']?.toString();
+    if (accessToken == null || refreshToken == null) {
+      throw Exception('Thiếu token từ máy chủ');
+    }
+
+    return AuthSession(
+      email: responseEmail,
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+  }
+}
+
+class AppRootPage extends StatefulWidget {
+  const AppRootPage({super.key});
+
+  @override
+  State<AppRootPage> createState() => _AppRootPageState();
+}
+
+class _AppRootPageState extends State<AppRootPage> {
+  final _storage = AuthStorage();
+  final _api = AuthApi();
+  AuthSession? _session;
+  bool _isBooting = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _hydrateSession();
+  }
+
+  Future<void> _hydrateSession() async {
+    final session = await _storage.load();
+    if (!mounted) {
+      return;
+    }
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _session = session;
+      _isBooting = false;
+    });
+  }
+
+  Future<void> _login(String email, String password) async {
+    final session = await _api.login(email: email, password: password);
+    await _storage.save(session);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _session = session;
+    });
+  }
+
+  Future<void> _logout() async {
+    await _storage.clear();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _session = null;
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
+    if (_isBooting) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if (_session == null) {
+      return LoginPage(onLogin: _login);
+    }
+
+    return DashboardPage(
+      session: _session!,
+      onLogout: _logout,
+    );
+  }
+}
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({required this.onLogin, super.key});
+
+  final Future<void> Function(String email, String password) onLogin;
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final _formKey = GlobalKey<FormState>();
+  final _emailController = TextEditingController(text: 'demo@shop.local');
+  final _passwordController = TextEditingController(text: '123456');
+  bool _isLoading = false;
+  bool _obscurePassword = true;
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (!_formKey.currentState!.validate()) {
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    try {
+      await widget.onLogin(
+        _emailController.text.trim(),
+        _passwordController.text,
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.toString().replaceFirst('Exception: ', ''))),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
+      appBar: AppBar(title: const Text('Đăng nhập')),
       body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Form(
+                  key: _formKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Live Commerce Mobile',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Đăng nhập để tham gia hoặc điều phối livestream.',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                      const SizedBox(height: 20),
+                      TextFormField(
+                        controller: _emailController,
+                        decoration: const InputDecoration(
+                          labelText: 'Email',
+                          prefixIcon: Icon(Icons.mail_outline),
+                        ),
+                        validator: (value) {
+                          final text = value?.trim() ?? '';
+                          if (text.isEmpty || !text.contains('@')) {
+                            return 'Email không hợp lệ';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: _passwordController,
+                        obscureText: _obscurePassword,
+                        decoration: InputDecoration(
+                          labelText: 'Mật khẩu',
+                          prefixIcon: const Icon(Icons.lock_outline),
+                          suffixIcon: IconButton(
+                            onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                            icon: Icon(_obscurePassword ? Icons.visibility_off : Icons.visibility),
+                          ),
+                        ),
+                        validator: (value) {
+                          if ((value ?? '').length < 6) {
+                            return 'Mật khẩu tối thiểu 6 ký tự';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 18),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: _isLoading ? null : _submit,
+                          icon: _isLoading
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                )
+                              : const Icon(Icons.login),
+                          label: const Text('Đăng nhập'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ),
-          ],
+          ),
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
+    );
+  }
+}
+
+class DashboardPage extends StatefulWidget {
+  const DashboardPage({
+    required this.session,
+    required this.onLogout,
+    super.key,
+  });
+
+  final AuthSession session;
+  final Future<void> Function() onLogout;
+
+  @override
+  State<DashboardPage> createState() => _DashboardPageState();
+}
+
+class _DashboardPageState extends State<DashboardPage> {
+  final _roomController = TextEditingController();
+  int _tabIndex = 0;
+
+  @override
+  void dispose() {
+    _roomController.dispose();
+    super.dispose();
+  }
+
+  String _buildMiniAppUrl(String path) {
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      return path;
+    }
+    final base = miniAppBaseUrl.endsWith('/') ? miniAppBaseUrl.substring(0, miniAppBaseUrl.length - 1) : miniAppBaseUrl;
+    final safePath = path.startsWith('/') ? path : '/$path';
+    return '$base$safePath';
+  }
+
+  void _openLive(String title, String path) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => LiveWebViewPage(
+          title: title,
+          url: _buildMiniAppUrl(path),
+        ),
+      ),
+    );
+  }
+
+  void _openJoinOrHost({required bool isHost}) {
+    final roomId = _roomController.text.trim();
+    if (roomId.length < 5) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Vui lòng nhập Room ID hợp lệ')),
+      );
+      return;
+    }
+    final route = isHost ? '/host-room/$roomId' : '/join-room/$roomId';
+    _openLive(isHost ? 'Host livestream' : 'Xem livestream', route);
+  }
+
+  Future<void> _performLogout() async {
+    await widget.onLogout();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const motionPreviewData = [
+      _MotionCardData(
+        title: 'Aurora Product Card',
+        subtitle: 'Glow motion + tilt focus',
+        price: '\$129.90',
+        colorA: Color(0xFF22D3EE),
+        colorB: Color(0xFF2563EB),
+      ),
+      _MotionCardData(
+        title: 'Ember Product Card',
+        subtitle: 'Warm tone + reveal',
+        price: '\$89.50',
+        colorA: Color(0xFFFB7185),
+        colorB: Color(0xFFF97316),
+      ),
+      _MotionCardData(
+        title: 'Live Badge Card',
+        subtitle: 'Ready for livestream CTA',
+        price: '\$59.00',
+        colorA: Color(0xFF34D399),
+        colorB: Color(0xFF0EA5E9),
+      ),
+    ];
+
+    final pages = [
+      ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Thao tác livestream', style: Theme.of(context).textTheme.titleLarge),
+                  const SizedBox(height: 8),
+                  const Text('Nhập Room ID để join hoặc host như luồng web hiện tại.'),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: _roomController,
+                    decoration: const InputDecoration(
+                      labelText: 'Room ID',
+                      hintText: 'Ví dụ: ls-ag1ve8-mlj8vaph',
+                      prefixIcon: Icon(Icons.meeting_room_outlined),
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: () => _openJoinOrHost(isHost: false),
+                          icon: const Icon(Icons.play_circle_outline),
+                          label: const Text('Join live'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () => _openJoinOrHost(isHost: true),
+                          icon: const Icon(Icons.videocam_outlined),
+                          label: const Text('Host live'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.storefront_outlined),
+              title: const Text('Mở trang bán hàng'),
+              subtitle: const Text('Trang miniapp React với hiệu ứng ThreeJS + Tilt'),
+              trailing: const Icon(Icons.open_in_new),
+              onTap: () => _openLive('Trang bán hàng', '/'),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Text('Preview hiệu ứng card (native Flutter)', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 210,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: motionPreviewData.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 12),
+              itemBuilder: (context, index) {
+                return _RevealTiltCard(data: motionPreviewData[index], index: index);
+              },
+            ),
+          ),
+        ],
+      ),
+      ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Tài khoản', style: Theme.of(context).textTheme.titleLarge),
+                  const SizedBox(height: 12),
+                  Text('Email: ${widget.session.email}'),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Token: ${widget.session.accessToken.substring(0, widget.session.accessToken.length > 24 ? 24 : widget.session.accessToken.length)}...',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 16),
+                  FilledButton.tonalIcon(
+                    onPressed: _performLogout,
+                    icon: const Icon(Icons.logout),
+                    label: const Text('Đăng xuất'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    ];
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Live Commerce'),
+      ),
+      body: pages[_tabIndex],
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _tabIndex,
+        onDestinationSelected: (index) => setState(() => _tabIndex = index),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.live_tv_outlined), label: 'Livestream'),
+          NavigationDestination(icon: Icon(Icons.person_outline), label: 'Tài khoản'),
+        ],
+      ),
+    );
+  }
+}
+
+class _MotionCardData {
+  const _MotionCardData({
+    required this.title,
+    required this.subtitle,
+    required this.price,
+    required this.colorA,
+    required this.colorB,
+  });
+
+  final String title;
+  final String subtitle;
+  final String price;
+  final Color colorA;
+  final Color colorB;
+}
+
+class _RevealTiltCard extends StatelessWidget {
+  const _RevealTiltCard({
+    required this.data,
+    required this.index,
+  });
+
+  final _MotionCardData data;
+  final int index;
+
+  @override
+  Widget build(BuildContext context) {
+    final duration = Duration(milliseconds: 380 + index * 120);
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: duration,
+      curve: Curves.easeOutCubic,
+      builder: (context, value, child) {
+        return Opacity(
+          opacity: value,
+          child: Transform.translate(
+            offset: Offset(0, (1 - value) * 18),
+            child: child,
+          ),
+        );
+      },
+      child: _TiltPreviewCard(data: data),
+    );
+  }
+}
+
+class _TiltPreviewCard extends StatefulWidget {
+  const _TiltPreviewCard({required this.data});
+
+  final _MotionCardData data;
+
+  @override
+  State<_TiltPreviewCard> createState() => _TiltPreviewCardState();
+}
+
+class _TiltPreviewCardState extends State<_TiltPreviewCard> {
+  double _rx = 0;
+  double _ry = 0;
+
+  void _onPanUpdate(DragUpdateDetails details) {
+    setState(() {
+      _ry = (_ry + details.delta.dx * 0.006).clamp(-0.25, 0.25);
+      _rx = (_rx - details.delta.dy * 0.006).clamp(-0.25, 0.25);
+    });
+  }
+
+  void _reset() {
+    setState(() {
+      _rx = 0;
+      _ry = 0;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onPanUpdate: _onPanUpdate,
+      onPanEnd: (_) => _reset(),
+      onPanCancel: _reset,
+      child: Transform(
+        alignment: Alignment.center,
+        transform: Matrix4.identity()
+          ..setEntry(3, 2, 0.001)
+          ..rotateX(_rx)
+          ..rotateY(_ry),
+        child: Container(
+          width: 230,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                widget.data.colorA.withValues(alpha: 0.26),
+                widget.data.colorB.withValues(alpha: 0.26),
+              ],
+            ),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.25)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 9,
+                    height: 9,
+                    decoration: BoxDecoration(color: widget.data.colorA, shape: BoxShape.circle),
+                  ),
+                  const SizedBox(width: 8),
+                  const Text('MOTION CARD', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(widget.data.title, maxLines: 2, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 4),
+              Text(widget.data.subtitle, maxLines: 2, style: TextStyle(fontSize: 12, color: Colors.black.withValues(alpha: 0.65))),
+              const Spacer(),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(widget.data.price, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+                  Icon(Icons.flash_on_rounded, color: Color.lerp(widget.data.colorA, widget.data.colorB, 0.5)),
+                ],
+              ),
+              const SizedBox(height: 8),
+              LinearProgressIndicator(
+                value: 0.72 + math.sin((_rx + _ry) * 2) * 0.08,
+                backgroundColor: Colors.white.withValues(alpha: 0.24),
+                valueColor: AlwaysStoppedAnimation<Color>(widget.data.colorA),
+                minHeight: 5,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class LiveWebViewPage extends StatefulWidget {
+  const LiveWebViewPage({
+    required this.title,
+    required this.url,
+    super.key,
+  });
+
+  final String title;
+  final String url;
+
+  @override
+  State<LiveWebViewPage> createState() => _LiveWebViewPageState();
+}
+
+class _LiveWebViewPageState extends State<LiveWebViewPage> {
+  late final WebViewController _controller;
+  bool _isLoading = true;
+  String _lastWebMessage = 'Chưa có phản hồi';
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageStarted: (_) => setState(() => _isLoading = true),
+          onPageFinished: (_) {
+            setState(() => _isLoading = false);
+            _sendToWeb(
+              type: 'flutter_ready',
+              payload: {
+                'platform': defaultTargetPlatform.name,
+                'miniApp': 'product_v1_mobile',
+                'page': widget.title,
+              },
+            );
+          },
+          onWebResourceError: (_) => setState(() => _isLoading = false),
+        ),
+      )
+      ..addJavaScriptChannel(
+        'FlutterChannel',
+        onMessageReceived: (JavaScriptMessage message) {
+          setState(() => _lastWebMessage = message.message);
+        },
+      )
+      ..loadRequest(Uri.parse(widget.url));
+  }
+
+  Future<void> _sendToWeb({
+    required String type,
+    Map<String, dynamic>? payload,
+  }) async {
+    final data = jsonEncode({
+      'source': 'flutter',
+      'type': type,
+      'payload': payload ?? {},
+      'timestamp': DateTime.now().toIso8601String(),
+    });
+    final escapedData = jsonEncode(data);
+    await _controller.runJavaScript(
+      'window.receiveFromFlutter && window.receiveFromFlutter($escapedData);',
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.title),
+        actions: [
+          IconButton(
+            tooltip: 'Gửi ping sang web',
+            onPressed: () {
+              _sendToWeb(
+                type: 'ping_from_flutter',
+                payload: {'message': 'Ping từ mobile'},
+              );
+            },
+            icon: const Icon(Icons.send_outlined),
+          ),
+          IconButton(
+            tooltip: 'Tải lại',
+            onPressed: () => _controller.reload(),
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          if (_isLoading) const LinearProgressIndicator(minHeight: 2),
+          Expanded(child: WebViewWidget(controller: _controller)),
+          Container(
+            width: double.infinity,
+            color: const Color(0xFFF2F2F2),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Text(
+              'Web gửi về Flutter: $_lastWebMessage',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12, color: Colors.black87),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
